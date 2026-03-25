@@ -35,6 +35,13 @@ export function Dashboard() {
         </article>
 
         <article className={statCard}>
+          <p className={statLabel}>Total de Cotas</p>
+          <p className={statValueNeutral}>
+            {(summary?.totalQuotas ?? 0).toFixed(4)}
+          </p>
+        </article>
+
+        <article className={statCard}>
           <p className={statLabel}>Total de Movimentações</p>
           <p className={statValueNeutral}>{summary?.totalTransactions ?? 0}</p>
         </article>

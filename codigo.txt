@@ -1,0 +1,3127 @@
+========== ./.github/workflows/ci.yml ==========
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: desafio_merito
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm install
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/desafio_merito?schema=public
+
+      - name: Generate Prisma Client
+        working-directory: backend
+        run: |
+          chmod +x node_modules/.bin/prisma
+          node_modules/.bin/prisma generate
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/desafio_merito?schema=public
+
+      - name: Run migrations
+        working-directory: backend
+        run: node_modules/.bin/prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/desafio_merito?schema=public
+
+      - name: Run tests
+        working-directory: backend
+        run: |
+          chmod +x node_modules/.bin/jest
+          node_modules/.bin/jest --runInBand
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/desafio_merito?schema=public
+          NODE_ENV: test
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t desafio-backend ./backend
+
+      - name: Deploy simulation
+        run: echo "Deploy concluído com sucesso!"
+========== ./backend/Dockerfile ==========
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN chmod +x node_modules/.bin/tsc && node_modules/.bin/tsc
+EXPOSE 3333
+CMD ["node", "dist/server.js"]
+========== ./backend/jest.config.js ==========
+module.exports = {
+  preset: 'ts-jest',
+  testEnvironment: 'node',
+  testMatch: ['**/tests/**/*.test.ts', '**/*.spec.ts'],
+};
+========== ./backend/package.json ==========
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "jest --runInBand",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:generate": "prisma generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@prisma/client": "^6.19.2",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jest": "^29.5.0",
+    "@types/node": "^25.5.0",
+    "@types/supertest": "^7.2.0",
+    "jest": "^29.7.0",
+    "prisma": "^6.19.2",
+    "supertest": "^7.2.2",
+    "ts-jest": "^29.2.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "zod": "^4.3.6"
+  }
+}
+
+========== ./backend/prisma/migrations/20260324035533_init/migration.sql ==========
+CREATE TYPE "TransactionType" AS ENUM ('APORTE', 'RESGATE');
+
+CREATE TABLE "Fund" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "ticker" TEXT NOT NULL,
+    "type" TEXT NOT NULL,
+    "quotaValue" DOUBLE PRECISION NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Fund_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "Transaction" (
+    "id" TEXT NOT NULL,
+    "fundId" TEXT NOT NULL,
+    "type" "TransactionType" NOT NULL,
+    "value" DOUBLE PRECISION NOT NULL,
+    "quotas" DOUBLE PRECISION NOT NULL,
+    "date" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Transaction_pkey" PRIMARY KEY ("id")
+);
+
+CREATE UNIQUE INDEX "Fund_ticker_key" ON "Fund"("ticker");
+
+ALTER TABLE "Transaction" ADD CONSTRAINT "Transaction_fundId_fkey" FOREIGN KEY ("fundId") REFERENCES "Fund"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+========== ./backend/prisma/schema.prisma ==========
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Fund {
+  id           String        @id @default(uuid())
+  name         String
+  ticker       String        @unique
+  type         String
+  quotaValue   Float
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  transactions Transaction[]
+}
+
+model Transaction {
+  id        String          @id @default(uuid())
+  fundId    String
+  fund      Fund            @relation(fields: [fundId], references: [id], onDelete: Cascade)
+  type      TransactionType
+  value     Float
+  quotas    Float
+  date      DateTime
+  createdAt DateTime        @default(now())
+}
+
+enum TransactionType {
+  APORTE
+  RESGATE
+}
+
+========== ./backend/src/controllers/fund.controller.ts ==========
+import { Request, Response, NextFunction } from 'express';
+import { fundService } from '../services/fund.service';
+
+export const fundController = {
+  getAll: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try { res.json(await fundService.getAll()); } catch (err) { next(err); }
+  },
+  getById: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try { res.json(await fundService.getById(String(req.params.id))); } catch (err) { next(err); }
+  },
+  create: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try { res.status(201).json(await fundService.create(req.body)); } catch (err) { next(err); }
+  },
+  update: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try { res.json(await fundService.update(String(req.params.id), req.body)); } catch (err) { next(err); }
+  },
+  delete: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try { await fundService.delete(String(req.params.id)); res.status(204).send(); } catch (err) { next(err); }
+  },
+};
+========== ./backend/src/controllers/transaction.controller.ts ==========
+import { Request, Response, NextFunction } from 'express';
+import { transactionService } from '../services/transaction.service';
+
+export const transactionController = {
+  getAll: async (req: Request, res: Response, next: NextFunction) => {
+    try { res.json(await transactionService.getAll()); } catch (err) { next(err); }
+  },
+  getWalletSummary: async (req: Request, res: Response, next: NextFunction) => {
+    try { res.json(await transactionService.getWalletSummary()); } catch (err) { next(err); }
+  },
+  create: async (req: Request, res: Response, next: NextFunction) => {
+    try { res.status(201).json(await transactionService.create(req.body)); } catch (err) { next(err); }
+  },
+  delete: async (req: Request, res: Response, next: NextFunction) => {
+    try { await transactionService.delete(req.params.id as string); res.status(204).send(); } catch (err) { next(err); }
+  },
+};
+
+========== ./backend/src/lib/prisma.ts ==========
+import { PrismaClient } from '@prisma/client';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+
+export const prisma = globalForPrisma.prisma ?? new PrismaClient();
+
+if (process.env.NODE_ENV !== 'production') {
+  globalForPrisma.prisma = prisma;
+}
+========== ./backend/src/middlewares/error.middleware.ts ==========
+import { Request, Response, NextFunction } from 'express';
+
+export class AppError extends Error {
+  statusCode: number;
+
+  constructor(message: string, statusCode = 400) {
+    super(message);
+    this.name = 'AppError';
+    this.statusCode = statusCode;
+    Object.setPrototypeOf(this, AppError.prototype);
+  }
+}
+
+export function errorMiddleware(
+  err: Error,
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  if (err instanceof AppError) {
+    return res.status(err.statusCode).json({ error: err.message });
+  }
+  console.error(err);
+  return res.status(500).json({ error: 'Internal server error' });
+}
+========== ./backend/src/middlewares/validate.middleware.ts ==========
+import { Request, Response, NextFunction } from 'express';
+import { z, ZodSchema } from 'zod';
+
+export function validate(schema: ZodSchema) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      const errors = result.error.issues.map((issue) => ({
+        field: issue.path.join('.'),
+        message: issue.message,
+      }));
+      res.status(400).json({ error: 'Validation error', details: errors });
+      return;
+    }
+    req.body = result.data;
+    next();
+  };
+}
+
+export const CreateFundSchema = z.object({
+  name: z.string().min(1, 'Nome é obrigatório'),
+  ticker: z.string().min(1, 'Ticker é obrigatório').transform((v) => v.toUpperCase()),
+  type: z.string().min(1, 'Tipo é obrigatório'),
+  quotaValue: z
+    .number('Valor da cota deve ser um número')
+    .positive('Valor da cota deve ser positivo'),
+});
+
+export const UpdateFundSchema = z.object({
+  name: z.string().min(1).optional(),
+  ticker: z
+    .string()
+    .min(1)
+    .transform((v) => v.toUpperCase())
+    .optional(),
+  type: z.string().min(1).optional(),
+  quotaValue: z.number().positive().optional(),
+});
+
+export const CreateTransactionSchema = z.object({
+  fundId: z.string().min(1, 'Fundo é obrigatório'),
+  type: z.enum(['APORTE', 'RESGATE'], 'Tipo deve ser APORTE ou RESGATE'),
+  value: z
+    .number('Valor deve ser um número')
+    .positive('Valor deve ser positivo'),
+  date: z.string().min(1, 'Data é obrigatória'),
+});
+========== ./backend/src/repositories/fund.repository.ts ==========
+import { prisma } from '../lib/prisma';
+
+export interface CreateFundDTO {
+  name: string;
+  ticker: string;
+  type: string;
+  quotaValue: number;
+}
+
+export const fundRepository = {
+  findAll: () => prisma.fund.findMany({ orderBy: { createdAt: 'desc' } }),
+  findById: (id: string) => prisma.fund.findUnique({ where: { id } }),
+  findByTicker: (ticker: string) => prisma.fund.findUnique({ where: { ticker } }),
+  create: (data: CreateFundDTO) => prisma.fund.create({ data }),
+  update: (id: string, data: Partial<CreateFundDTO>) => prisma.fund.update({ where: { id }, data }),
+  delete: (id: string) => prisma.fund.delete({ where: { id } }),
+};
+========== ./backend/src/repositories/transaction.repository.ts ==========
+import { prisma } from '../lib/prisma';
+
+export type TransactionType = 'APORTE' | 'RESGATE';
+
+export interface CreateTransactionDTO {
+  fundId: string;
+  type: TransactionType;
+  value: number;
+  quotas: number;
+  date: Date;
+}
+
+export const transactionRepository = {
+  findAll: () =>
+    prisma.transaction.findMany({
+      orderBy: { date: 'desc' },
+      include: { fund: { select: { name: true, ticker: true } } },
+    }),
+
+  findByFundId: (fundId: string) =>
+    prisma.transaction.findMany({
+      where: { fundId },
+      orderBy: { date: 'desc' },
+      include: { fund: { select: { name: true, ticker: true } } },
+    }),
+
+  create: (data: CreateTransactionDTO) =>
+    prisma.transaction.create({
+      data,
+      include: { fund: { select: { name: true, ticker: true } } },
+    }),
+
+  delete: (id: string) => prisma.transaction.delete({ where: { id } }),
+
+  getWalletBalance: async (): Promise<number> => {
+    const result = await prisma.transaction.groupBy({
+      by: ['type'],
+      _sum: { value: true },
+    });
+
+    type ResultItem = (typeof result)[number];
+
+    const aporte =
+      result.find((r: ResultItem) => r.type === 'APORTE')?._sum.value ?? 0;
+
+    const resgate =
+      result.find((r: ResultItem) => r.type === 'RESGATE')?._sum.value ?? 0;
+
+    return aporte - resgate;
+  },
+};
+========== ./backend/src/routes/fund.routes.ts ==========
+import { Router } from 'express';
+import { fundController } from '../controllers/fund.controller';
+import { validate, CreateFundSchema, UpdateFundSchema } from '../middlewares/validate.middleware';
+
+export const fundRoutes = Router();
+
+fundRoutes.get('/', fundController.getAll);
+fundRoutes.get('/:id', fundController.getById);
+fundRoutes.post('/', validate(CreateFundSchema), fundController.create);
+fundRoutes.put('/:id', validate(UpdateFundSchema), fundController.update);
+fundRoutes.delete('/:id', fundController.delete);
+========== ./backend/src/routes/transaction.routes.ts ==========
+import { Router } from 'express';
+import { transactionController } from '../controllers/transaction.controller';
+import { validate, CreateTransactionSchema } from '../middlewares/validate.middleware';
+
+export const transactionRoutes = Router();
+
+transactionRoutes.get('/', transactionController.getAll);
+transactionRoutes.get('/wallet/summary', transactionController.getWalletSummary);
+transactionRoutes.post('/', validate(CreateTransactionSchema), transactionController.create);
+transactionRoutes.delete('/:id', transactionController.delete);
+========== ./backend/src/server.ts ==========
+import express from 'express';
+import cors from 'cors';
+import 'dotenv/config';
+import { fundRoutes } from './routes/fund.routes';
+import { transactionRoutes } from './routes/transaction.routes';
+import { errorMiddleware } from './middlewares/error.middleware';
+
+const app = express();
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type'],
+  })
+);
+
+app.use(express.json());
+
+app.use('/api/funds', fundRoutes);
+app.use('/api/transactions', transactionRoutes);
+
+app.use(errorMiddleware);
+
+const PORT = process.env.PORT || 3333;
+
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+export default app;
+========== ./backend/src/services/fund.service.ts ==========
+import { fundRepository, CreateFundDTO } from '../repositories/fund.repository';
+import { AppError } from '../middlewares/error.middleware';
+
+export const fundService = {
+  getAll: () => fundRepository.findAll(),
+  getById: async (id: string) => {
+    const fund = await fundRepository.findById(id);
+    if (!fund) throw new AppError('Fund not found', 404);
+    return fund;
+  },
+  create: async (data: CreateFundDTO) => {
+    const existing = await fundRepository.findByTicker(data.ticker);
+    if (existing) throw new AppError('Ticker already exists');
+    return fundRepository.create(data);
+  },
+  update: async (id: string, data: Partial<CreateFundDTO>) => {
+    await fundService.getById(id);
+    return fundRepository.update(id, data);
+  },
+  delete: async (id: string) => {
+    await fundService.getById(id);
+    return fundRepository.delete(id);
+  },
+};
+========== ./backend/src/services/transaction.service.ts ==========
+import {
+  transactionRepository,
+  CreateTransactionDTO,
+  TransactionType,
+} from '../repositories/transaction.repository';
+import { fundRepository } from '../repositories/fund.repository';
+import { AppError } from '../middlewares/error.middleware';
+import { prisma } from '../lib/prisma';
+
+export const transactionService = {
+  getAll: () => transactionRepository.findAll(),
+
+  getByFund: (fundId: string) => transactionRepository.findByFundId(fundId),
+
+  getWalletSummary: async () => {
+    const balance = await transactionRepository.getWalletBalance();
+    const totalTransactions = await prisma.transaction.count();
+    return { balance, totalTransactions };
+  },
+
+  create: async (data: {
+    fundId: string;
+    type: string;
+    value: number;
+    date: string;
+  }) => {
+    const fund = await fundRepository.findById(data.fundId);
+    if (!fund) throw new AppError('Fund not found', 404);
+
+    if (!['APORTE', 'RESGATE'].includes(data.type)) {
+      throw new AppError('Invalid transaction type');
+    }
+    if (data.type === 'RESGATE') {
+      const currentBalance = await transactionRepository.getWalletBalance();
+      if (data.value > currentBalance) {
+        throw new AppError(
+          `Saldo insuficiente. Saldo atual: R$ ${currentBalance.toFixed(2)}`,
+          400,
+        );
+      }
+    }
+
+    const quotas = data.value / fund.quotaValue;
+
+    const dto: CreateTransactionDTO = {
+      fundId: data.fundId,
+      type: data.type as TransactionType,
+      value: data.value,
+      quotas,
+      date: new Date(data.date + 'T12:00:00-03:00'),
+    };
+
+    return transactionRepository.create(dto);
+  },
+
+  delete: async (id: string) => transactionRepository.delete(id),
+};
+========== ./backend/tests/fund.test.ts ==========
+import request from 'supertest';
+import app from '../src/server';
+import { prisma } from '../src/lib/prisma';
+
+const baseFund = {
+  name: 'Fundo Teste',
+  ticker: 'FT11',
+  type: 'FII',
+  quotaValue: 100,
+};
+
+beforeEach(async () => {
+  await prisma.transaction.deleteMany();
+  await prisma.fund.deleteMany();
+});
+
+afterAll(async () => {
+  await prisma.transaction.deleteMany();
+  await prisma.fund.deleteMany();
+  await prisma.$disconnect();
+});
+
+describe('Fund Routes', () => {
+  it('GET /api/funds - deve retornar 200 e array vazio', async () => {
+    const res = await request(app).get('/api/funds');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(0);
+  });
+
+  it('POST /api/funds - deve criar um fundo', async () => {
+    const res = await request(app).post('/api/funds').send(baseFund);
+    expect(res.status).toBe(201);
+    expect(res.body.ticker).toBe('FT11');
+    expect(res.body.name).toBe('Fundo Teste');
+  });
+
+  it('POST /api/funds - deve retornar 400 se ticker duplicado', async () => {
+    await request(app).post('/api/funds').send(baseFund);
+    const res = await request(app).post('/api/funds').send(baseFund);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBeDefined();
+  });
+
+  it('POST /api/funds - deve retornar 400 se dados inválidos', async () => {
+    const res = await request(app).post('/api/funds').send({ name: '', ticker: '', quotaValue: -1 });
+    expect(res.status).toBe(400);
+    expect(res.body.details).toBeDefined();
+  });
+
+  it('GET /api/funds/:id - deve retornar o fundo criado', async () => {
+    const created = await request(app).post('/api/funds').send(baseFund);
+    const res = await request(app).get(`/api/funds/${created.body.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(created.body.id);
+  });
+
+  it('GET /api/funds/:id - deve retornar 404 se não encontrar', async () => {
+    const res = await request(app).get('/api/funds/id-inexistente');
+    expect(res.status).toBe(404);
+  });
+
+  it('PUT /api/funds/:id - deve atualizar o fundo', async () => {
+    const created = await request(app).post('/api/funds').send(baseFund);
+    const res = await request(app)
+      .put(`/api/funds/${created.body.id}`)
+      .send({ name: 'Nome Atualizado' });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Nome Atualizado');
+  });
+
+  it('DELETE /api/funds/:id - deve deletar o fundo', async () => {
+    const created = await request(app).post('/api/funds').send(baseFund);
+    const res = await request(app).delete(`/api/funds/${created.body.id}`);
+    expect(res.status).toBe(204);
+  });
+});
+
+describe('Transaction Routes', () => {
+  it('POST /api/transactions - deve criar uma transação (APORTE)', async () => {
+    const fund = await request(app).post('/api/funds').send(baseFund);
+    const res = await request(app).post('/api/transactions').send({
+      fundId: fund.body.id,
+      type: 'APORTE',
+      value: 500,
+      date: '2024-01-15',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.type).toBe('APORTE');
+    expect(res.body.quotas).toBeCloseTo(5);
+  });
+
+  it('POST /api/transactions - deve retornar 400 se tipo inválido', async () => {
+    const fund = await request(app).post('/api/funds').send(baseFund);
+    const res = await request(app).post('/api/transactions').send({
+      fundId: fund.body.id,
+      type: 'INVALIDO',
+      value: 500,
+      date: '2024-01-15',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /api/transactions - deve retornar 404 se fundo não existe', async () => {
+    const res = await request(app).post('/api/transactions').send({
+      fundId: 'fundo-inexistente',
+      type: 'APORTE',
+      value: 500,
+      date: '2024-01-15',
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('GET /api/transactions/wallet/summary - deve retornar saldo correto', async () => {
+    const fund = await request(app).post('/api/funds').send(baseFund);
+    await request(app).post('/api/transactions').send({
+      fundId: fund.body.id,
+      type: 'APORTE',
+      value: 1000,
+      date: '2024-01-15',
+    });
+    await request(app).post('/api/transactions').send({
+      fundId: fund.body.id,
+      type: 'RESGATE',
+      value: 300,
+      date: '2024-01-20',
+    });
+    const res = await request(app).get('/api/transactions/wallet/summary');
+    expect(res.status).toBe(200);
+    expect(res.body.balance).toBeCloseTo(700);
+    expect(res.body.totalTransactions).toBe(2);
+  });
+
+  it('DELETE /api/transactions/:id - deve deletar a transação', async () => {
+    const fund = await request(app).post('/api/funds').send(baseFund);
+    const tx = await request(app).post('/api/transactions').send({
+      fundId: fund.body.id,
+      type: 'APORTE',
+      value: 500,
+      date: '2024-01-15',
+    });
+    const res = await request(app).delete(`/api/transactions/${tx.body.id}`);
+    expect(res.status).toBe(204);
+  });
+});
+========== ./backend/tsconfig.json ==========
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "tests"]
+}
+
+========== ./docker-compose.yml ==========
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: desafio_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: desafio_merito
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    container_name: desafio_backend
+    ports:
+      - '3333:3333'
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/desafio_merito?schema=public
+      PORT: 3333
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
+========== ./frontend/README.md ==========
+# Desafio Fullstack — Mérito
+
+Dashboard de gestão de fundos de investimento com registro de aportes e resgates, cálculo automático de cotas e controle de saldo da carteira.
+
+## Tecnologias
+
+**Backend:** Node.js · Express · TypeScript · PostgreSQL · Prisma ORM · Jest · Zod  
+**Frontend:** React · TypeScript · Tailwind CSS · TanStack Query · React Hook Form · Zod  
+**DevOps:** Docker · Docker Compose · GitHub Actions
+
+---
+
+## Funcionalidades
+
+- Cadastro, listagem e remoção de fundos de investimento (nome, ticker, tipo, valor da cota)
+- Registro de aportes e resgates com cálculo automático de cotas
+- Validação de saldo antes de permitir resgates
+- Dashboard com saldo da carteira e últimas movimentações em tempo real
+- Validação de formulários no frontend (Zod + React Hook Form) e no backend (Zod middleware)
+- Tratamento de erros centralizado no backend com `AppError`
+- Feedback visual de erros e sucessos via toasts no frontend
+- Testes automatizados no backend (Jest + Supertest)
+
+---
+
+## Pré-requisitos
+
+- Node.js 20+
+- npm
+- PostgreSQL rodando localmente **ou** Docker instalado
+
+---
+
+## Como rodar localmente (sem Docker)
+
+### 1. Clonar o repositório
+```bash
+git clone https://github.com/MessiasEduarda/desafio-fullstack.git
+cd desafio-fullstack
+```
+
+### 2. Configurar e iniciar o Backend
+```bash
+cd backend
+npm install
+cp .env.example .env
+```
+
+Edite o `.env` com suas credenciais do PostgreSQL:
+```env
+DATABASE_URL="postgresql://postgres:root@localhost:5432/merito_dev"
+PORT=3333
+FRONTEND_URL=http://localhost:5173
+NODE_ENV=development
+```
+
+> **Atenção:** certifique-se de que o banco `merito_dev` existe no PostgreSQL antes de rodar as migrations. Você pode criá-lo pelo pgAdmin (botão direito em Databases → Create → Database → nome: `merito_dev`) ou via psql:
+> ```sql
+> CREATE DATABASE merito_dev;
+> ```
+```bash
+npx prisma migrate dev --name init
+npm run dev
+```
+
+API disponível em: `http://localhost:3333`
+
+### 3. Configurar e iniciar o Frontend
+
+Em outro terminal:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Acesse a aplicação em: `http://localhost:5173`
+
+---
+
+## Como rodar com Docker
+
+Sobe o banco de dados PostgreSQL e o backend com um único comando na raiz do projeto:
+```bash
+docker-compose up --build
+```
+
+- Backend: `http://localhost:3333`
+- PostgreSQL: porta `5432`
+
+Depois suba o frontend separadamente:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+---
+
+## Rodar os testes
+
+Os testes usam um banco SQLite em memória e não precisam de PostgreSQL rodando.
+```bash
+cd backend
+npm test
+```
+
+Para rodar com cobertura:
+```bash
+npm test -- --coverage
+```
+
+---
+
+## Testando a API
+
+### Via curl
+
+#### Fundos
+```bash
+# Listar todos os fundos
+curl http://localhost:3333/api/funds
+
+# Cadastrar fundo
+curl -X POST http://localhost:3333/api/funds \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Maxi Renda","ticker":"MXRF11","type":"FII","quotaValue":10.50}'
+
+# Buscar fundo por ID
+curl http://localhost:3333/api/funds/<id>
+
+# Atualizar fundo
+curl -X PUT http://localhost:3333/api/funds/<id> \
+  -H "Content-Type: application/json" \
+  -d '{"quotaValue":11.00}'
+
+# Remover fundo
+curl -X DELETE http://localhost:3333/api/funds/<id>
+```
+
+#### Movimentações
+```bash
+# Listar movimentações (ordenadas por data)
+curl http://localhost:3333/api/transactions
+
+# Registrar aporte
+curl -X POST http://localhost:3333/api/transactions \
+  -H "Content-Type: application/json" \
+  -d '{"fundId":"<id>","type":"APORTE","value":1000,"date":"2024-03-24"}'
+
+# Registrar resgate
+curl -X POST http://localhost:3333/api/transactions \
+  -H "Content-Type: application/json" \
+  -d '{"fundId":"<id>","type":"RESGATE","value":500,"date":"2024-03-24"}'
+
+# Saldo e resumo da carteira
+curl http://localhost:3333/api/transactions/wallet/summary
+
+# Remover movimentação
+curl -X DELETE http://localhost:3333/api/transactions/<id>
+```
+
+### Via Postman
+
+Base URL: `http://localhost:3333`
+
+| Método | Rota | Descrição |
+|--------|------|-----------|
+| GET | `/api/funds` | Lista todos os fundos |
+| GET | `/api/funds/:id` | Busca fundo por ID |
+| POST | `/api/funds` | Cadastra um fundo |
+| PUT | `/api/funds/:id` | Atualiza um fundo |
+| DELETE | `/api/funds/:id` | Remove um fundo |
+| GET | `/api/transactions` | Lista movimentações |
+| POST | `/api/transactions` | Registra movimentação |
+| DELETE | `/api/transactions/:id` | Remove movimentação |
+| GET | `/api/transactions/wallet/summary` | Saldo da carteira |
+
+---
+
+## Estrutura do Projeto
+```
+desafio-fullstack/
+├── backend/
+│   ├── src/
+│   │   ├── controllers/      # Camada HTTP (req/res)
+│   │   ├── services/         # Regras de negócio
+│   │   ├── repositories/     # Acesso ao banco via Prisma
+│   │   ├── middlewares/      # Validação (Zod) e tratamento de erros
+│   │   ├── routes/           # Definição das rotas Express
+│   │   ├── lib/              # Instância do Prisma
+│   │   └── server.ts         # Entry point
+│   ├── prisma/
+│   │   └── schema.prisma
+│   └── tests/
+│       └── fund.test.ts
+├── frontend/
+│   └── src/
+│       ├── components/       # Componentes reutilizáveis (ui/, layout/)
+│       ├── hooks/            # React Query hooks
+│       ├── pages/            # Dashboard, Fundos, Movimentações
+│       ├── services/         # Chamadas à API (axios)
+│       ├── types/            # Interfaces TypeScript
+│       └── utils/            # Formatadores e helpers
+├── docker-compose.yml
+├── Dockerfile
+└── README.md
+```
+
+---
+
+## Variáveis de Ambiente
+
+### Backend (`backend/.env`)
+
+| Variável | Descrição | Exemplo |
+|----------|-----------|---------|
+| `DATABASE_URL` | URL de conexão PostgreSQL | `postgresql://postgres:root@localhost:5432/merito_dev` |
+| `PORT` | Porta do servidor | `3333` |
+| `FRONTEND_URL` | URL do frontend (CORS) | `http://localhost:5173` |
+| `NODE_ENV` | Ambiente de execução | `development` |
+
+### Frontend (`frontend/.env`)
+
+| Variável | Descrição | Exemplo |
+|----------|-----------|---------|
+| `VITE_API_URL` | URL base da API | `http://localhost:3333/api` |
+
+---
+
+## Decisões técnicas
+
+- **Arquitetura em camadas** (Controller → Service → Repository) para separar responsabilidades e facilitar testes.
+- **Zod** para validação tanto no backend (middleware) quanto no frontend (formulários), garantindo consistência nos schemas.
+- **TanStack Query** para cache e sincronização de estado do servidor, evitando chamadas desnecessárias.
+- **AppError** customizado no backend para tratamento centralizado com status HTTP corretos.
+- **Validação de saldo** antes de registrar resgates, retornando erro 400 com mensagem clara ao usuário.
+========== ./frontend/eslint.config.js ==========
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import tseslint from 'typescript-eslint'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      js.configs.recommended,
+      tseslint.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+    },
+  },
+])
+
+========== ./frontend/package.json ==========
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^3.0.0",
+    "@tanstack/react-query": "^5.0.0",
+    "axios": "^1.13.6",
+    "lucide-react": "^1.0.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-hook-form": "^7.72.0",
+    "react-router-dom": "^7.13.2",
+    "zod": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.9.3",
+    "vite": "^5.0.0"
+  }
+}
+
+========== ./frontend/postcss.config.js ==========
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+
+========== ./frontend/src/App.css ==========
+.counter {
+  font-size: 16px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 2px solid transparent;
+  transition: border-color 0.3s;
+  margin-bottom: 24px;
+
+  &:hover {
+    border-color: var(--accent-border);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+.hero {
+  position: relative;
+
+  .base,
+  .framework,
+  .vite {
+    inset-inline: 0;
+    margin: 0 auto;
+  }
+
+  .base {
+    width: 170px;
+    position: relative;
+    z-index: 0;
+  }
+
+  .framework,
+  .vite {
+    position: absolute;
+  }
+
+  .framework {
+    z-index: 1;
+    top: 34px;
+    height: 28px;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
+      scale(1.4);
+  }
+
+  .vite {
+    z-index: 0;
+    top: 107px;
+    height: 26px;
+    width: auto;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
+      scale(0.8);
+  }
+}
+
+#center {
+  display: flex;
+  flex-direction: column;
+  gap: 25px;
+  place-content: center;
+  place-items: center;
+  flex-grow: 1;
+
+  @media (max-width: 1024px) {
+    padding: 32px 20px 24px;
+    gap: 18px;
+  }
+}
+
+#next-steps {
+  display: flex;
+  border-top: 1px solid var(--border);
+  text-align: left;
+
+  & > div {
+    flex: 1 1 0;
+    padding: 32px;
+    @media (max-width: 1024px) {
+      padding: 24px 20px;
+    }
+  }
+
+  .icon {
+    margin-bottom: 16px;
+    width: 22px;
+    height: 22px;
+  }
+
+  @media (max-width: 1024px) {
+    flex-direction: column;
+    text-align: center;
+  }
+}
+
+#docs {
+  border-right: 1px solid var(--border);
+
+  @media (max-width: 1024px) {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+#next-steps ul {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  gap: 8px;
+  margin: 32px 0 0;
+
+  .logo {
+    height: 18px;
+  }
+
+  a {
+    color: var(--text-h);
+    font-size: 16px;
+    border-radius: 6px;
+    background: var(--social-bg);
+    display: flex;
+    padding: 6px 12px;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+    transition: box-shadow 0.3s;
+
+    &:hover {
+      box-shadow: var(--shadow);
+    }
+    .button-icon {
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    margin-top: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+
+    li {
+      flex: 1 1 calc(50% - 8px);
+    }
+
+    a {
+      width: 100%;
+      justify-content: center;
+      box-sizing: border-box;
+    }
+  }
+}
+
+#spacer {
+  height: 88px;
+  border-top: 1px solid var(--border);
+  @media (max-width: 1024px) {
+    height: 48px;
+  }
+}
+
+.ticks {
+  position: relative;
+  width: 100%;
+
+  &::before,
+  &::after {
+    content: '';
+    position: absolute;
+    top: -4.5px;
+    border: 5px solid transparent;
+  }
+
+  &::before {
+    left: 0;
+    border-left-color: var(--border);
+  }
+  &::after {
+    right: 0;
+    border-right-color: var(--border);
+  }
+}
+
+========== ./frontend/src/App.tsx ==========
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Layout } from './components/layout/Layout';
+import { Dashboard } from './pages/Dashboard';
+import { Funds } from './pages/Funds';
+import { Transactions } from './pages/Transactions';
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 0,
+      refetchOnWindowFocus: true,
+    },
+  },
+});
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <Layout>
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/funds" element={<Funds />} />
+            <Route path="/transactions" element={<Transactions />} />
+          </Routes>
+        </Layout>
+      </BrowserRouter>
+    </QueryClientProvider>
+  );
+}
+========== ./frontend/src/components/layout/Layout/index.tsx ==========
+import type { ReactNode } from 'react';
+import { Sidebar } from '../Sidebar';
+import { layoutWrapper, layoutMain } from './styles';
+
+interface LayoutProps {
+  children: ReactNode;
+}
+
+export function Layout({ children }: LayoutProps) {
+  return (
+    <div className={layoutWrapper}>
+      <Sidebar />
+
+      <main className={layoutMain}>
+        {children}
+      </main>
+    </div>
+  );
+}
+========== ./frontend/src/components/layout/Layout/styles.ts ==========
+export const layoutWrapper =
+  'flex min-h-screen bg-gray-50';
+
+export const layoutMain =
+  'flex-1 p-8 overflow-y-auto min-h-screen ml-16 max-lg:ml-0 transition-all duration-300';
+========== ./frontend/src/components/layout/Sidebar/index.tsx ==========
+import { NavLink, useLocation } from 'react-router-dom';
+import { LayoutDashboard, TrendingUp, ArrowLeftRight, Menu } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import type { ForwardRefExoticComponent, RefAttributes } from 'react';
+import type { LucideProps } from 'lucide-react';
+import {
+  mobileMenuButton,
+  overlay,
+  sidebarContainer,
+  sidebarContainerOpen,
+  sidebarContainerClose,
+  collapseButton,
+  topSectionMobileOverride,
+  titleText,
+  subtitleText,
+  logoCollapsed,
+  logoLetter,
+  dividerLine,
+  nav,
+  sectionDividerWrap,
+  sectionDividerLine,
+  sectionDividerLabel,
+  navItemBase,
+  navItemActive,
+  navItemInactive,
+  navItemBar,
+  navItemBarActive,
+  navItemBarInactive,
+  navItemIconWrap,
+  navItemIconActive,
+  navItemIconInactive,
+  navItemTextBase,
+  navItemTextActive,
+  navItemTextInactive,
+  tooltip,
+} from './styles';
+
+interface NavItem {
+  to: string;
+  label: string;
+  icon: ForwardRefExoticComponent<Omit<LucideProps, 'ref'> & RefAttributes<SVGSVGElement>>;
+  end?: boolean;
+}
+
+interface NavSection {
+  label: string;
+  items: NavItem[];
+}
+
+const sections: NavSection[] = [
+  {
+    label: 'Visão Geral',
+    items: [
+      { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+    ],
+  },
+  {
+    label: 'Operações',
+    items: [
+      { to: '/funds',        label: 'Fundos',        icon: TrendingUp },
+      { to: '/transactions', label: 'Movimentações', icon: ArrowLeftRight },
+    ],
+  },
+];
+
+function lineTransition(collapsed: boolean): React.CSSProperties {
+  return {
+    transform: `scaleX(${collapsed ? 0 : 1})`,
+    opacity: collapsed ? 0 : 1,
+    transition: [
+      `transform ${collapsed ? '0.2s' : '0.65s'} cubic-bezier(0.25,0.46,0.45,0.94) ${collapsed ? '0s' : '0.15s'}`,
+      `opacity   ${collapsed ? '0.15s' : '0.4s'} ease ${collapsed ? '0s' : '0.15s'}`,
+    ].join(', '),
+  };
+}
+
+function labelTransition(collapsed: boolean): React.CSSProperties {
+  return {
+    opacity: collapsed ? 0 : 1,
+    transform: `translateY(${collapsed ? '-5px' : '0'})`,
+    transition: [
+      `opacity   ${collapsed ? '0.12s' : '0.35s'} ease ${collapsed ? '0s' : '0.3s'}`,
+      `transform ${collapsed ? '0.12s' : '0.4s'} cubic-bezier(0.34,1.4,0.64,1) ${collapsed ? '0s' : '0.28s'}`,
+    ].join(', '),
+  };
+}
+
+function textTransition(collapsed: boolean, isMobile: boolean): React.CSSProperties {
+  return {
+    maxWidth: !isMobile && collapsed ? 0 : 170,
+    opacity: !isMobile && collapsed ? 0 : 1,
+    overflow: 'hidden',
+    whiteSpace: 'nowrap',
+    transition: [
+      `opacity   ${collapsed ? '0.1s' : '0.2s'} ease ${collapsed ? '0s' : '0.2s'}`,
+      'max-width 0.4s cubic-bezier(0.4,0,0.2,1)',
+    ].join(', '),
+  };
+}
+
+export function Sidebar() {
+  const location = useLocation();
+  const [isOpen, setIsOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
+  const navbarRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 1024px)');
+    setIsMobile(mq.matches);
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
+  useEffect(() => {
+    if (collapsed) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (navbarRef.current && !navbarRef.current.contains(event.target as Node)) {
+        setCollapsed(true);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [collapsed]);
+
+  return (
+    <>
+      <button onClick={() => setIsOpen(!isOpen)} className={mobileMenuButton}>
+        <Menu size={24} />
+      </button>
+
+      {isOpen && (
+        <div onClick={() => setIsOpen(false)} className={overlay} />
+      )}
+
+      <div
+        ref={navbarRef}
+        style={{ width: collapsed ? 64 : 240, minWidth: collapsed ? 64 : 240 }}
+        className={`${sidebarContainer} ${isOpen ? sidebarContainerOpen : sidebarContainerClose}`}
+      >
+        <div className="w-full">
+
+          <button
+            onClick={() => setCollapsed((prev) => !prev)}
+            title={collapsed ? 'Expandir menu' : 'Recolher menu'}
+            className={collapseButton}
+          >
+            {collapsed ? (
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                <line x1="3"  y1="6"  x2="14" y2="6"  stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="3"  y1="11" x2="14" y2="11" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="3"  y1="16" x2="14" y2="16" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                <polyline points="16,8 19,11 16,14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              </svg>
+            ) : (
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                <line x1="8"  y1="6"  x2="19" y2="6"  stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="8"  y1="11" x2="19" y2="11" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="8"  y1="16" x2="19" y2="16" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                <polyline points="6,8 3,11 6,14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              </svg>
+            )}
+          </button>
+
+          <div
+            style={{
+              maxWidth:    collapsed ? 0 : 240,
+              opacity:     collapsed ? 0 : 1,
+              paddingLeft: collapsed ? 0 : 20,
+              marginTop:   52,
+              overflow:    'hidden',
+              whiteSpace:  'nowrap',
+              transition: [
+                'max-width 0.4s cubic-bezier(0.4,0,0.2,1)',
+                `opacity ${collapsed ? '0.15s' : '0.25s'} ease ${collapsed ? '0s' : '0.15s'}`,
+                'padding-left 0.4s cubic-bezier(0.4,0,0.2,1)',
+              ].join(', '),
+            }}
+            className={topSectionMobileOverride}
+          >
+            <h1 style={{ fontFamily: 'Georgia, serif' }} className={titleText}>
+              Mérito
+            </h1>
+            <p className={subtitleText}>Dashboard de Investimentos</p>
+          </div>
+
+          {/* Logo colapsado */}
+          <div
+            style={{
+              opacity:    collapsed ? 1 : 0,
+              maxHeight:  collapsed ? 80 : 0,
+              marginTop:  collapsed ? -80 : 0,
+              transform:  collapsed ? 'scale(1)' : 'scale(0.85)',
+              visibility: collapsed ? 'visible' : 'hidden',
+              overflow:   'hidden',
+              transition: [
+                `opacity   ${collapsed ? '0.25s' : '0.15s'} ease ${collapsed ? '0.2s' : '0s'}`,
+                'max-height 0.4s cubic-bezier(0.4,0,0.2,1)',
+                'margin-top 0.4s cubic-bezier(0.4,0,0.2,1)',
+                'visibility 0.4s ease',
+                `transform  ${collapsed ? '0.35s' : '0.15s'} cubic-bezier(0.34,1.56,0.64,1) ${collapsed ? '0.15s' : '0s'}`,
+              ].join(', '),
+            }}
+            className={logoCollapsed}
+          >
+            <span style={{ fontFamily: 'Georgia, serif' }} className={logoLetter}>M</span>
+          </div>
+
+          <div
+            style={{
+              marginTop:       collapsed ? 45 : 0,
+              marginBottom:    collapsed ? 8  : 0,
+              transform:       `scaleX(${collapsed ? 1 : 0})`,
+              opacity:         collapsed ? 1  : 0,
+              transformOrigin: 'left center',
+              transition: [
+                `transform ${collapsed ? '0.65s' : '0.2s'} cubic-bezier(0.25,0.46,0.45,0.94) ${collapsed ? '0.15s' : '0s'}`,
+                `opacity   ${collapsed ? '0.4s'  : '0.15s'} ease ${collapsed ? '0.15s' : '0s'}`,
+                'margin-top 0.4s cubic-bezier(0.4,0,0.2,1)',
+                'margin-bottom 0.4s cubic-bezier(0.4,0,0.2,1)',
+              ].join(', '),
+            }}
+            className={dividerLine}
+          />
+
+          {/* Nav */}
+          <nav className={nav}>
+            {sections.map((section, sectionIndex) => (
+              <div key={section.label} className="w-full">
+
+                {/* Section divider */}
+                <div
+                  style={{ marginTop: sectionIndex === 0 ? 2 : 8, marginBottom: 2 }}
+                  className={sectionDividerWrap}
+                >
+                  <div
+                    style={{ ...lineTransition(collapsed), transformOrigin: 'left center', marginLeft: 16 }}
+                    className={sectionDividerLine}
+                  />
+                  <span style={labelTransition(collapsed)} className={sectionDividerLabel}>
+                    {section.label}
+                  </span>
+                  <div
+                    style={{ ...lineTransition(collapsed), transformOrigin: 'right center', marginRight: 16 }}
+                    className={sectionDividerLine}
+                  />
+                </div>
+
+                {/* Items */}
+                {section.items.map(({ to, label, icon: Icon, end }) => {
+                  const selected = end
+                    ? location.pathname === to
+                    : location.pathname.startsWith(to);
+
+                  return (
+                    <NavLink
+                      key={to}
+                      to={to}
+                      end={end}
+                      onClick={() => setIsOpen(false)}
+                      className={`${navItemBase} ${selected ? navItemActive : navItemInactive}`}
+                    >
+                      <span className={`${navItemBar} ${selected ? navItemBarActive : navItemBarInactive}`} />
+
+                      <span className={navItemIconWrap}>
+                        <Icon size={18} className={selected ? navItemIconActive : navItemIconInactive} />
+                      </span>
+
+                      <span
+                        style={textTransition(collapsed, isMobile)}
+                        className={`${navItemTextBase} ${selected ? navItemTextActive : navItemTextInactive}`}
+                      >
+                        {label}
+                      </span>
+
+                      <span className={tooltip}>{label}</span>
+                    </NavLink>
+                  );
+                })}
+              </div>
+            ))}
+          </nav>
+        </div>
+      </div>
+    </>
+  );
+}
+========== ./frontend/src/components/layout/Sidebar/styles.ts ==========
+export const mobileMenuButton =
+  'hidden max-lg:flex fixed top-4 left-4 z-[1100] items-center justify-center bg-[#BBA188] hover:bg-[#a8906f] text-white p-[10px] rounded-lg shadow-lg transition-colors duration-300';
+
+export const overlay =
+  'hidden max-lg:block fixed inset-0 bg-black/50 z-[999]';
+
+export const sidebarContainer = [
+  'h-screen py-6 bg-[#0f0f0f] border-r border-[#2a2a2a]',
+  'flex flex-col items-start justify-between flex-shrink-0',
+  'fixed left-0 top-0 overflow-hidden overflow-y-auto z-[1000]',
+  '[transition:width_0.4s_cubic-bezier(0.4,0,0.2,1),min-width_0.4s_cubic-bezier(0.4,0,0.2,1)]',
+  '[&::-webkit-scrollbar]:w-[3px] [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-[#2a2a2a] [&::-webkit-scrollbar-thumb]:rounded',
+  'max-lg:!w-60 max-lg:!min-w-[240px]',
+  'max-lg:[transition:transform_0.35s_cubic-bezier(0.4,0,0.2,1)]',
+].join(' ');
+
+export const sidebarContainerOpen  = 'max-lg:translate-x-0';
+export const sidebarContainerClose = 'max-lg:-translate-x-full';
+
+export const collapseButton =
+  'max-lg:hidden flex items-center justify-center absolute left-3 top-6 z-10 w-10 h-10 bg-[#1e1e1e] hover:bg-[#2a2a2a] text-[#95A5A6] hover:text-[#BBA188] rounded-[10px] border-0 cursor-pointer transition-all duration-250';
+
+export const topSectionMobileOverride =
+  'max-lg:!max-w-[240px] max-lg:!opacity-100 max-lg:!pl-5';
+
+export const titleText =
+  'text-[26px] font-extrabold text-[#BBA188] tracking-tight mt-2 mb-1 whitespace-nowrap';
+
+export const subtitleText =
+  'text-[13px] text-[#95A5A6] mb-6 whitespace-nowrap';
+
+export const logoCollapsed =
+  'max-lg:hidden flex items-center justify-center w-full overflow-hidden';
+
+export const logoLetter =
+  'text-[22px] font-extrabold text-[#BBA188]';
+
+export const dividerLine =
+  'max-lg:hidden w-[85%] h-px bg-[#2a2a2a] pointer-events-none';
+
+export const dividerLineBottom =
+  'max-lg:hidden w-[85%] h-px bg-[#2a2a2a] pointer-events-none';
+
+export const nav = 'w-full flex flex-col mt-1';
+
+export const sectionDividerWrap =
+  'flex items-center w-full overflow-hidden';
+
+export const sectionDividerLine =
+  'max-lg:![transform:scaleX(1)] max-lg:!opacity-100 flex-1 h-px bg-[#2a2a2a]';
+
+export const sectionDividerLabel =
+  'max-lg:!opacity-100 max-lg:![transform:translateY(0)] text-[9px] font-semibold text-[#444] tracking-[0.09em] uppercase whitespace-nowrap px-2 flex-shrink-0';
+
+export const navItemBase =
+  'group relative flex items-center w-full pr-4 py-2 no-underline rounded-r-full transition-all duration-250';
+
+export const navItemActive  = 'bg-[rgba(187,161,136,0.08)]';
+export const navItemInactive = 'hover:bg-[rgba(187,161,136,0.06)]';
+
+export const navItemBar = 'absolute left-0 top-0 bottom-0 w-[3px] rounded-r transition-colors duration-250';
+export const navItemBarActive   = 'bg-[#BBA188]';
+export const navItemBarInactive = 'bg-transparent group-hover:bg-[#BBA188]';
+
+export const navItemIconWrap =
+  'flex items-center justify-center w-16 min-w-[64px] flex-shrink-0 max-lg:w-14 max-lg:min-w-[56px]';
+
+export const navItemIconActive =
+  'transition-all duration-250 text-[#BBA188]';
+
+export const navItemIconInactive =
+  'transition-all duration-250 text-[#95A5A6] group-hover:text-[#BBA188] group-hover:scale-110';
+
+export const navItemTextBase =
+  'text-[12px] max-lg:text-[13px] max-lg:!opacity-100 max-lg:!max-w-[170px]';
+
+export const navItemTextActive =
+  'font-semibold text-[#BBA188]';
+
+export const navItemTextInactive =
+  'font-normal text-[#95A5A6] group-hover:text-[#BBA188] group-hover:font-semibold';
+
+export const tooltip =
+  "pointer-events-none absolute left-[calc(100%+12px)] top-1/2 -translate-y-1/2 -translate-x-1 opacity-0 group-hover:opacity-100 group-hover:translate-x-0 bg-[#1e1e1e] border border-[#2a2a2a] text-[#BBA188] text-xs font-medium px-[10px] py-[5px] rounded-lg whitespace-nowrap shadow-[4px_4px_16px_rgba(0,0,0,0.4)] transition-all duration-150 z-[9999] before:content-[''] before:absolute before:right-full before:top-1/2 before:-translate-y-1/2 before:border-[5px] before:border-transparent before:border-r-[#2a2a2a]";
+
+export const logoutButton =
+  'group relative flex items-center w-full pr-4 py-2 border-0 bg-transparent cursor-pointer text-[12px] font-normal text-[#95A5A6] rounded-r-full transition-all duration-250 hover:bg-[rgba(231,76,60,0.07)] hover:text-[#E74C3C] max-lg:py-[10px] max-lg:text-[13px]';
+
+export const logoutBar =
+  'absolute left-0 top-0 bottom-0 w-[3px] rounded-r bg-transparent group-hover:bg-[#E74C3C] transition-colors duration-250';
+
+export const logoutIconWrap =
+  'flex items-center justify-center w-16 min-w-[64px] flex-shrink-0 max-lg:w-14 max-lg:min-w-[56px]';
+
+export const logoutIcon =
+  'text-[#95A5A6] group-hover:text-[#E74C3C] group-hover:scale-110 transition-all duration-250';
+
+export const logoutTextClass =
+  'max-lg:!opacity-100 max-lg:!max-w-[170px]';
+========== ./frontend/src/components/layout/index.ts ==========
+export { Sidebar } from './Sidebar';
+export { Layout } from './Layout';
+========== ./frontend/src/components/ui/Badge/index.tsx ==========
+import { badgeBase, badgeVariants } from './styles';
+
+export interface BadgeProps {
+  label: string;
+  variant: keyof typeof badgeVariants;
+}
+
+export function Badge({ label, variant }: BadgeProps) {
+  return (
+    <span className={`${badgeBase} ${badgeVariants[variant]}`}>
+      {label}
+    </span>
+  );
+}
+========== ./frontend/src/components/ui/Badge/styles.ts ==========
+export const badgeVariants = {
+  success: 'bg-green-100 text-green-700 border border-green-200',
+  danger:  'bg-red-100 text-red-700 border border-red-200',
+  info:    'bg-blue-100 text-blue-700 border border-blue-200',
+  warning: 'bg-yellow-100 text-yellow-700 border border-yellow-200',
+  neutral: 'bg-gray-100 text-gray-600 border border-gray-200',
+} as const;
+
+export const badgeBase = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium';
+========== ./frontend/src/components/ui/Button/index.tsx ==========
+import type { ButtonHTMLAttributes } from 'react';
+import { buttonBase, buttonVariants, buttonSizes } from './styles';
+
+export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: keyof typeof buttonVariants;
+  size?: keyof typeof buttonSizes;
+  loading?: boolean;
+}
+
+export function Button({
+  variant = 'primary',
+  size = 'md',
+  loading = false,
+  children,
+  className = '',
+  disabled,
+  ...rest
+}: ButtonProps) {
+  return (
+    <button
+      {...rest}
+      disabled={disabled || loading}
+      className={`${buttonBase} ${buttonVariants[variant]} ${buttonSizes[size]} ${className}`}
+    >
+      {loading ? (
+        <>
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+          Aguarde...
+        </>
+      ) : (
+        children
+      )}
+    </button>
+  );
+}
+========== ./frontend/src/components/ui/Button/styles.ts ==========
+export const buttonVariants = {
+  primary: 'bg-[#a8906f] hover:bg-[#967f5f] text-white shadow-sm',
+
+  danger:  'bg-red-600 hover:bg-red-700 text-white shadow-sm',
+
+  secondary: 'bg-gray-100 hover:bg-gray-200 text-gray-800 border border-gray-300',
+
+  ghost: 'bg-transparent hover:bg-gray-100 text-gray-700',
+} as const;
+export const buttonSizes = {
+  sm: 'px-3 py-1.5 text-xs',
+  md: 'px-4 py-2 text-sm',
+  lg: 'px-6 py-3 text-base',
+} as const;
+
+export const buttonBase =
+  'inline-flex items-center justify-center gap-2 rounded-full font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500';
+========== ./frontend/src/components/ui/ConfirmModal/index.tsx ==========
+import { Modal } from '../Modal';
+import { Button } from '../Button';
+
+export interface ConfirmModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+  title?: string;
+  message: string;
+  confirmLabel?: string;
+  isPending?: boolean;
+}
+
+export function ConfirmModal({
+  isOpen,
+  onClose,
+  onConfirm,
+  title = 'Confirmar ação',
+  message,
+  confirmLabel = 'Confirmar',
+  isPending = false,
+}: ConfirmModalProps) {
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={title}>
+      <div className="space-y-4">
+        <p className="text-sm text-gray-600">{message}</p>
+        <div className="flex gap-2 justify-end pt-2">
+          <Button variant="secondary" type="button" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button variant="danger" type="button" loading={isPending} onClick={onConfirm}>
+            {confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+========== ./frontend/src/components/ui/CurrencyInput/index.tsx ==========
+import { useState } from 'react';
+import type { InputHTMLAttributes } from 'react';
+import { inputBase, inputStates, labelStyle, errorStyle } from '../Input/styles';
+
+export interface CurrencyInputProps
+  extends Omit<InputHTMLAttributes<HTMLInputElement>, 'onChange' | 'value'> {
+  label?: string;
+  error?: string;
+  value?: number | string;
+  onChange?: (value: number) => void;
+}
+
+function formatDisplay(raw: string): string {
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return '';
+  const cents = parseInt(digits, 10);
+  return (cents / 100).toLocaleString('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+export function CurrencyInput({
+  label,
+  error,
+  value,
+  onChange,
+  className = '',
+  id,
+  ...rest
+}: CurrencyInputProps) {
+  const inputId = id ?? label?.toLowerCase().replace(/\s+/g, '-');
+
+  const toDisplay = (v: number | string | undefined) => {
+    if (v === undefined || v === '' || v === 0) return '';
+    const num = typeof v === 'string' ? parseFloat(v) : v;
+    if (isNaN(num)) return '';
+    return num.toLocaleString('pt-BR', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  };
+
+  const [display, setDisplay] = useState(() => toDisplay(value));
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const formatted = formatDisplay(e.target.value);
+    setDisplay(formatted);
+    const numeric = parseFloat(formatted.replace(/\./g, '').replace(',', '.')) || 0;
+    onChange?.(numeric);
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      {label && (
+        <label htmlFor={inputId} className={labelStyle}>
+          {label}
+        </label>
+      )}
+      <div className="relative">
+        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm text-[#9e8b78] pointer-events-none select-none">
+          R$
+        </span>
+        <input
+          id={inputId}
+          type="text"
+          inputMode="numeric"
+          value={display}
+          onChange={handleChange}
+          placeholder="0,00"
+          {...rest}
+          className={`${inputBase} ${error ? inputStates.error : inputStates.default} pl-10 ${className}`}
+        />
+      </div>
+      {error && <span className={errorStyle}>{error}</span>}
+    </div>
+  );
+}
+========== ./frontend/src/components/ui/Input/index.tsx ==========
+import { forwardRef } from 'react';
+import type { InputHTMLAttributes } from 'react';
+import { inputBase, inputStates, labelStyle, errorStyle } from './styles';
+
+export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+  label?: string;
+  error?: string;
+}
+
+export const Input = forwardRef<HTMLInputElement, InputProps>(
+  ({ label, error, className = '', id, ...rest }, ref) => {
+    const inputId = id ?? label?.toLowerCase().replace(/\s+/g, '-');
+    return (
+      <div className="flex flex-col gap-1">
+        {label && (
+          <label htmlFor={inputId} className={labelStyle}>
+            {label}
+          </label>
+        )}
+        <input
+          ref={ref}
+          id={inputId}
+          {...rest}
+          className={`${inputBase} ${error ? inputStates.error : inputStates.default} ${className}`}
+        />
+        {error && <span className={errorStyle}>{error}</span>}
+      </div>
+    );
+  }
+);
+
+Input.displayName = 'Input';
+========== ./frontend/src/components/ui/Input/styles.ts ==========
+export const inputBase =
+  'w-full border rounded-full px-4 py-2 text-sm outline-none transition-all duration-200 bg-white placeholder:text-[#c4b4a4] text-[#3d2f22]';
+
+export const inputStates = {
+  default: 'border-[#d4c4b4] focus:border-[#a8906f] focus:ring-2 focus:ring-[#a8906f]/20',
+  error:   'border-red-400 focus:border-red-500 focus:ring-2 focus:ring-red-100',
+} as const;
+
+export const labelStyle = 'text-sm font-medium text-[#5c4a38]';
+export const errorStyle = 'text-xs text-red-500 mt-0.5';
+========== ./frontend/src/components/ui/Modal/index.tsx ==========
+import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import type { ReactNode } from 'react';
+import { containerStyle, headerStyle, titleStyle, closeButtonStyle, bodyStyle } from './styles';
+
+export interface ModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+}
+
+export function Modal({ isOpen, onClose, title, children }: ModalProps) {
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    if (isOpen) document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: '100vw',
+        height: '100vh',
+        zIndex: 9999,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        backdropFilter: 'blur(4px)',
+        padding: '1rem',
+      }}
+    >
+      <div className={containerStyle}>
+        <div className={headerStyle}>
+          <h2 className={titleStyle}>{title}</h2>
+          <button onClick={onClose} className={closeButtonStyle}>✕</button>
+        </div>
+        <div className={bodyStyle}>{children}</div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+========== ./frontend/src/components/ui/Modal/styles.ts ==========
+export const overlayStyle =
+  'fixed top-0 left-0 w-screen h-screen z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4';
+
+export const containerStyle =
+  'bg-white rounded-2xl shadow-2xl w-full max-w-md animate-fade-in';
+
+export const headerStyle =
+  'flex items-center justify-between px-6 py-4 border-b border-[#f0e8de]';
+
+export const titleStyle = 'text-lg font-semibold text-[#3d2f22]';
+
+export const closeButtonStyle =
+  'text-[#9e8b78] hover:text-[#3d2f22] hover:bg-[#faf7f4] rounded-lg p-1.5 transition-colors text-lg leading-none';
+
+export const bodyStyle = 'px-6 py-5';
+========== ./frontend/src/components/ui/Select/index.tsx ==========
+import { forwardRef, useState, useRef, useEffect } from 'react';
+import type { SelectHTMLAttributes } from 'react';
+import { selectBase, selectStates, labelStyle, errorStyle } from './styles';
+
+export interface SelectOption {
+  value: string;
+  label: string;
+}
+
+export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
+  label?: string;
+  error?: string;
+  options: SelectOption[];
+  placeholder?: string;
+}
+
+export const Select = forwardRef<HTMLSelectElement, SelectProps>(
+  (
+    { label, error, options, placeholder = 'Selecione...', className = '', id, onChange, value, defaultValue, ...rest },
+    ref
+  ) => {
+    const selectId = id ?? label?.toLowerCase().replace(/\s+/g, '-');
+    const [isOpen, setIsOpen] = useState(false);
+    const [selected, setSelected] = useState<string>(
+      (value as string) ?? (defaultValue as string) ?? ''
+    );
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    const selectedLabel =
+      options.find((o) => o.value === selected)?.label ?? placeholder;
+
+    useEffect(() => {
+      if (value !== undefined) setSelected(value as string);
+    }, [value]);
+
+    useEffect(() => {
+      const handleClickOutside = (e: MouseEvent) => {
+        if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+          setIsOpen(false);
+        }
+      };
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const handleSelect = (optValue: string) => {
+      setSelected(optValue);
+      setIsOpen(false);
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype, 'value'
+      )?.set;
+      if (hiddenRef.current && nativeInputValueSetter) {
+        nativeInputValueSetter.call(hiddenRef.current, optValue);
+        hiddenRef.current.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    };
+
+    const hiddenRef = useRef<HTMLSelectElement>(null);
+
+    return (
+      <div className="flex flex-col gap-1" ref={containerRef}>
+        {label && (
+          <label htmlFor={selectId} className={labelStyle}>
+            {label}
+          </label>
+        )}
+
+        <select
+          ref={(node) => {
+            (hiddenRef as React.MutableRefObject<HTMLSelectElement | null>).current = node;
+            if (typeof ref === 'function') ref(node);
+            else if (ref) (ref as React.MutableRefObject<HTMLSelectElement | null>).current = node;
+          }}
+          id={selectId}
+          value={selected}
+          onChange={(e) => {
+            setSelected(e.target.value);
+            onChange?.(e);
+          }}
+          className="sr-only"
+          tabIndex={-1}
+          aria-hidden="true"
+          {...rest}
+        >
+          <option value="">{placeholder}</option>
+          {options.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setIsOpen((v) => !v)}
+            className={`
+              ${selectBase}
+              ${error ? selectStates.error : selectStates.default}
+              ${className}
+              flex items-center justify-between pr-4 text-left
+              ${selected ? 'text-[#3d2f22]' : 'text-[#c4b4a4]'}
+            `}
+          >
+            <span className="truncate">{selectedLabel}</span>
+            <span
+              className={`ml-2 text-[#a8906f] text-xs transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
+            >
+              ▼
+            </span>
+          </button>
+
+          {isOpen && (
+            <ul
+              className="
+                absolute z-50 w-full mt-2
+                bg-white border border-[#e8ddd0]
+                rounded-[20px] shadow-lg
+                overflow-hidden
+                animate-in fade-in slide-in-from-top-1 duration-150
+              "
+            >
+              {options.map((opt) => (
+                <li key={opt.value}>
+                  <button
+                    type="button"
+                    onClick={() => handleSelect(opt.value)}
+                    className={`
+                      w-full text-left px-5 py-2.5 text-sm transition-colors duration-100
+                      ${opt.value === selected
+                        ? 'bg-[#a8906f]/10 text-[#a8906f] font-medium'
+                        : 'text-[#5c4a38] hover:bg-[#faf7f4]'
+                      }
+                    `}
+                  >
+                    {opt.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {error && <span className={errorStyle}>{error}</span>}
+      </div>
+    );
+  }
+);
+
+Select.displayName = 'Select';
+========== ./frontend/src/components/ui/Select/styles.ts ==========
+export const selectBase =
+  'w-full border rounded-full px-4 py-2 text-sm outline-none bg-white transition-all duration-200 cursor-pointer appearance-none text-[#3d2f22]';
+
+export const selectStates = {
+  default: 'border-[#d4c4b4] focus:border-[#a8906f] focus:ring-2 focus:ring-[#a8906f]/20',
+  error:   'border-red-400 focus:border-red-500 focus:ring-2 focus:ring-red-100',
+} as const;
+
+export const labelStyle = 'text-sm font-medium text-[#5c4a38]';
+export const errorStyle = 'text-xs text-red-500 mt-0.5';
+========== ./frontend/src/components/ui/Toast/index.tsx ==========
+import { useEffect, useState } from 'react';
+
+export type ToastType = 'success' | 'error' | 'info';
+
+export interface ToastMessage {
+  id: string;
+  type: ToastType;
+  message: string;
+}
+
+interface ToastItemProps {
+  toast: ToastMessage;
+  onRemove: (id: string) => void;
+}
+
+const toastStyles: Record<ToastType, string> = {
+  success: 'bg-green-600 text-white',
+  error:   'bg-red-600 text-white',
+  info:    'bg-blue-600 text-white',
+};
+
+const toastIcons: Record<ToastType, string> = {
+  success: '✓',
+  error:   '✕',
+  info:    'ℹ',
+};
+
+function ToastItem({ toast, onRemove }: ToastItemProps) {
+  useEffect(() => {
+    const timer = setTimeout(() => onRemove(toast.id), 4000);
+    return () => clearTimeout(timer);
+  }, [toast.id, onRemove]);
+
+  return (
+    <div
+      className={`flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg text-sm font-medium animate-fade-in min-w-[260px] max-w-sm ${toastStyles[toast.type]}`}
+      role="alert"
+    >
+      <span className="text-base font-bold">{toastIcons[toast.type]}</span>
+      <span className="flex-1">{toast.message}</span>
+      <button
+        onClick={() => onRemove(toast.id)}
+        className="opacity-70 hover:opacity-100 transition-opacity text-lg leading-none"
+        aria-label="Fechar notificação"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+interface ToastContainerProps {
+  toasts: ToastMessage[];
+  onRemove: (id: string) => void;
+}
+
+export function ToastContainer({ toasts, onRemove }: ToastContainerProps) {
+  return (
+    <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-2">
+      {toasts.map((toast) => (
+        <ToastItem key={toast.id} toast={toast} onRemove={onRemove} />
+      ))}
+    </div>
+  );
+}
+
+export function useToast() {
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const add = (message: string, type: ToastType = 'info') => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts((prev) => [...prev, { id, type, message }]);
+  };
+
+  const remove = (id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  return {
+    toasts,
+    remove,
+    success: (msg: string) => add(msg, 'success'),
+    error:   (msg: string) => add(msg, 'error'),
+    info:    (msg: string) => add(msg, 'info'),
+  };
+}
+========== ./frontend/src/components/ui/index.ts ==========
+export { Button } from './Button';
+export { Input } from './Input';
+export { CurrencyInput } from './CurrencyInput';
+export { Select } from './Select';
+export { Badge } from './Badge';
+export { Modal } from './Modal';
+export { ConfirmModal } from './ConfirmModal';
+export { ToastContainer, useToast } from './Toast';
+export type { ToastType, ToastMessage } from './Toast';
+========== ./frontend/src/hooks/useFunds.ts ==========
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { fundService } from '../services/fund.service';
+import type { CreateFundDTO } from '../types';
+
+export function useFunds() {
+  return useQuery({
+    queryKey: ['funds'],
+    queryFn: fundService.getAll,
+  });
+}
+
+export function useCreateFund() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (dto: CreateFundDTO) => fundService.create(dto),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['funds'] }),
+  });
+}
+
+export function useUpdateFund() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, dto }: { id: string; dto: Partial<CreateFundDTO> }) =>
+      fundService.update(id, dto),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['funds'] }),
+  });
+}
+
+export function useDeleteFund() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => fundService.delete(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['funds'] }),
+  });
+}
+========== ./frontend/src/hooks/useTransactions.ts ==========
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { transactionService } from '../services/transaction.service';
+import type { CreateTransactionDTO } from '../types';
+
+export function useTransactions() {
+  return useQuery({
+    queryKey: ['transactions'],
+    queryFn: transactionService.getAll,
+  });
+}
+
+export function useWalletSummary() {
+  return useQuery({
+    queryKey: ['walletSummary'],
+    queryFn: transactionService.getWalletSummary,
+  });
+}
+
+export function useCreateTransaction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (dto: CreateTransactionDTO) => transactionService.create(dto),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      queryClient.invalidateQueries({ queryKey: ['walletSummary'] });
+    },
+  });
+}
+
+export function useDeleteTransaction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => transactionService.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      queryClient.invalidateQueries({ queryKey: ['walletSummary'] });
+    },
+  });
+}
+========== ./frontend/src/index.css ==========
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+========== ./frontend/src/main.tsx ==========
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.tsx'
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+
+========== ./frontend/src/pages/Dashboard/index.tsx ==========
+import { useWalletSummary, useTransactions } from '../../hooks/useTransactions';
+import { useFunds } from '../../hooks/useFunds';
+import { Badge } from '../../components/ui';
+import { fmt } from '../../utils/format';
+import {
+  pageWrapper, pageHeader, pageTitle, pageSubtitle,
+  statsGrid, statCard, statLabel,
+  statValueGreen, statValueRed, statValueNeutral,
+  tableCard, tableCardHeader, tableCardTitle,
+  tableWrapper, table, tableHead, tableTh,
+  tableTbody, tableTr, tableTd, tableTdBold, emptyState,
+} from './styles';
+
+export function Dashboard() {
+  const { data: summary }      = useWalletSummary();
+  const { data: transactions } = useTransactions();
+  const { data: funds }        = useFunds();
+
+  const balance = summary?.balance ?? 0;
+
+  return (
+    <section className={`${pageWrapper} mt-6`}>
+
+      <header className={pageHeader}>
+        <h1 className={pageTitle}>Dashboard</h1>
+        <p className={pageSubtitle}>Visão geral da sua carteira</p>
+      </header>
+
+      <div className={statsGrid}>
+        <article className={statCard}>
+          <p className={statLabel}>Saldo da Carteira</p>
+          <p className={balance >= 0 ? statValueGreen : statValueRed}>
+            {fmt(balance)}
+          </p>
+        </article>
+
+        <article className={statCard}>
+          <p className={statLabel}>Total de Movimentações</p>
+          <p className={statValueNeutral}>{summary?.totalTransactions ?? 0}</p>
+        </article>
+
+        <article className={statCard}>
+          <p className={statLabel}>Fundos Cadastrados</p>
+          <p className={statValueNeutral}>{funds?.length ?? 0}</p>
+        </article>
+      </div>
+
+      <section className={tableCard}>
+        <header className={tableCardHeader}>
+          <h2 className={tableCardTitle}>Últimas Movimentações</h2>
+        </header>
+
+        <div className={tableWrapper}>
+          <table className={table}>
+            <thead className={tableHead}>
+              <tr>
+                {['Data', 'Fundo', 'Tipo', 'Valor', 'Cotas'].map((h) => (
+                  <th key={h} className={tableTh}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={tableTbody}>
+              {transactions?.slice(0, 5).map((t) => (
+                <tr key={t.id} className={tableTr}>
+                  <td className={tableTd}>
+                    {new Date(t.date).toLocaleDateString('pt-BR')}
+                  </td>
+                  <td className={tableTdBold}>{t.fund.name}</td>
+                  <td className={tableTd}>
+                    <Badge
+                      label={t.type}
+                      variant={t.type === 'APORTE' ? 'success' : 'danger'}
+                    />
+                  </td>
+                  <td className={tableTd}>{fmt(t.value)}</td>
+                  <td className={tableTd}>{t.quotas.toFixed(4)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {(!transactions || transactions.length === 0) && (
+            <p className={emptyState}>Nenhuma movimentação registrada</p>
+          )}
+        </div>
+      </section>
+
+    </section>
+  );
+}
+========== ./frontend/src/pages/Dashboard/styles.ts ==========
+export {
+  tableCard,
+  tableCardHeader,
+  tableCardTitle,
+  tableWrapper,
+  table,
+  tableHead,
+  tableTh,
+  tableTbody,
+  tableTr,
+  tableTd,
+  tableTdBold,
+  emptyState,
+  pageWrapper,
+  pageHeader,
+  pageTitle,
+  pageSubtitle,
+} from '../../styles/shared';
+
+export const statsGrid = 'grid grid-cols-1 md:grid-cols-3 gap-5';
+export const statCard =
+  'bg-white rounded-2xl p-6 shadow-sm border border-[#e8ddd0] relative overflow-hidden ' +
+  'before:absolute before:inset-x-0 before:top-0 before:h-[3px] before:bg-gradient-to-r before:from-[#a8906f] before:to-[#c8aa88]';
+export const statLabel = 'text-xs font-semibold uppercase tracking-widest text-[#9e8b78]';
+export const statValueGreen = 'text-3xl font-bold mt-3 text-[#2d7a4f] tracking-tight';
+export const statValueRed   = 'text-3xl font-bold mt-3 text-red-600 tracking-tight';
+export const statValueNeutral = 'text-3xl font-bold mt-3 text-[#3d2f22] tracking-tight';
+========== ./frontend/src/pages/Funds/index.tsx ==========
+import { useState } from 'react';
+import { useForm, Controller } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { useFunds, useCreateFund, useDeleteFund } from '../../hooks/useFunds';
+import {
+  Button, Input, Select, Modal, Badge, ConfirmModal,
+  ToastContainer, useToast, CurrencyInput,
+} from '../../components/ui';
+import { fmt } from '../../utils/format';
+import { getErrorMessage } from '../../utils/error';
+import {
+  pageWrapper, pageHeader, pageTitleGroup, pageTitle, pageSubtitle,
+  tableCard, tableWrapper, table, tableHead, tableTh,
+  tableTbody, tableTr, tableTd, tableTdBold, emptyState,
+  formWrapper, formActions,
+} from './styles';
+
+const schema = z.object({
+  name:       z.string().min(2, 'Nome obrigatório'),
+  ticker:     z.string().min(2, 'Ticker obrigatório'),
+  type:       z.string().min(1, 'Tipo obrigatório'),
+  quotaValue: z.coerce.number().positive('Valor deve ser positivo'),
+});
+
+type FormData = z.infer<typeof schema>;
+
+const FUND_TYPES = [
+  { value: 'Renda Fixa',     label: 'Renda Fixa' },
+  { value: 'Renda Variável', label: 'Renda Variável' },
+  { value: 'Multimercado',   label: 'Multimercado' },
+  { value: 'FII',            label: 'FII' },
+];
+
+export function Funds() {
+  const [isOpen, setIsOpen]             = useState(false);
+  const [fundToDelete, setFundToDelete] = useState<string | null>(null);
+  const toast                           = useToast();
+
+  const { data: funds, isLoading }                             = useFunds();
+  const { mutate: createFund, isPending }                      = useCreateFund();
+  const { mutate: deleteFund, isPending: isDeleting }          = useDeleteFund();
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    control,
+    formState: { errors },
+  } = useForm<FormData>({ resolver: zodResolver(schema) });
+
+  const onSubmit = (data: FormData) => {
+    createFund(data, {
+      onSuccess: () => {
+        reset();
+        setIsOpen(false);
+        toast.success('Fundo cadastrado com sucesso!');
+      },
+      onError: (err) => {
+        toast.error(getErrorMessage(err));
+      },
+    });
+  };
+
+  const handleConfirmDelete = () => {
+    if (!fundToDelete) return;
+    deleteFund(fundToDelete, {
+      onSuccess: () => {
+        setFundToDelete(null);
+        toast.success('Fundo removido com sucesso!');
+      },
+      onError: (err) => {
+        setFundToDelete(null);
+        toast.error(getErrorMessage(err));
+      },
+    });
+  };
+
+  return (
+    <section className={pageWrapper}>
+      <ToastContainer toasts={toast.toasts} onRemove={toast.remove} />
+
+      <header className={pageHeader}>
+        <div className={pageTitleGroup}>
+          <h1 className={pageTitle}>Fundos</h1>
+          <p className={pageSubtitle}>Gerencie os fundos de investimento</p>
+        </div>
+        <Button onClick={() => setIsOpen(true)}>+ Novo Fundo</Button>
+      </header>
+
+      <article className={tableCard}>
+        <div className={tableWrapper}>
+          <table className={table}>
+            <thead className={tableHead}>
+              <tr>
+                {['Nome', 'Ticker', 'Tipo', 'Valor da Cota', 'Ações'].map((h) => (
+                  <th key={h} className={tableTh}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={tableTbody}>
+              {isLoading && (
+                <tr>
+                  <td colSpan={5} className={emptyState}>Carregando...</td>
+                </tr>
+              )}
+              {funds?.map((fund) => (
+                <tr key={fund.id} className={tableTr}>
+                  <td className={tableTdBold}>{fund.name}</td>
+                  <td className={tableTd}>
+                    <Badge label={fund.ticker} variant="info" />
+                  </td>
+                  <td className={tableTd}>{fund.type}</td>
+                  <td className={tableTd}>{fmt(fund.quotaValue)}</td>
+                  <td className={tableTd}>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => setFundToDelete(fund.id)}
+                    >
+                      Remover
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {(!funds || funds.length === 0) && !isLoading && (
+            <p className={emptyState}>Nenhum fundo cadastrado</p>
+          )}
+        </div>
+      </article>
+
+      <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title="Novo Fundo">
+        <form onSubmit={handleSubmit(onSubmit)} className={formWrapper}>
+          <Input
+            label="Nome do Fundo"
+            {...register('name')}
+            error={errors.name?.message}
+          />
+          <Input
+            label="Ticker"
+            {...register('ticker')}
+            error={errors.ticker?.message}
+            placeholder="Ex: MXRF11"
+          />
+          <Select
+            label="Tipo"
+            {...register('type')}
+            options={FUND_TYPES}
+            error={errors.type?.message}
+          />
+          <Controller
+            name="quotaValue"
+            control={control}
+            render={({ field }) => (
+              <CurrencyInput
+                label="Valor da Cota (R$)"
+                value={field.value}
+                onChange={field.onChange}
+                error={errors.quotaValue?.message}
+              />
+            )}
+          />
+          <div className={formActions}>
+            <Button variant="secondary" type="button" onClick={() => setIsOpen(false)}>
+              Cancelar
+            </Button>
+            <Button type="submit" loading={isPending}>Cadastrar</Button>
+          </div>
+        </form>
+      </Modal>
+
+      <ConfirmModal
+        isOpen={fundToDelete !== null}
+        onClose={() => setFundToDelete(null)}
+        onConfirm={handleConfirmDelete}
+        title="Remover Fundo"
+        message="Tem certeza que deseja remover este fundo? Esta ação não pode ser desfeita."
+        confirmLabel="Remover"
+        isPending={isDeleting}
+      />
+    </section>
+  );
+}
+========== ./frontend/src/pages/Funds/styles.ts ==========
+export {
+  tableCard,
+  tableWrapper,
+  table,
+  tableHead,
+  tableTh,
+  tableTbody,
+  tableTr,
+  tableTd,
+  tableTdBold,
+  emptyState,
+  formWrapper,
+  formActions,
+  pageWrapper,
+  pageHeader,
+  pageTitle,
+  pageSubtitle,
+  pageTitleGroup,
+} from '../../styles/shared';
+========== ./frontend/src/pages/Transactions/index.tsx ==========
+import { useState } from 'react';
+import { useForm, Controller } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import {
+  useTransactions,
+  useCreateTransaction,
+  useDeleteTransaction,
+  useWalletSummary,
+} from '../../hooks/useTransactions';
+import { useFunds } from '../../hooks/useFunds';
+import {
+  Button, Input, Select, Modal, Badge, ConfirmModal,
+  ToastContainer, useToast, CurrencyInput,
+} from '../../components/ui';
+import { fmt } from '../../utils/format';
+import { getErrorMessage } from '../../utils/error';
+import {
+  pageWrapper, pageHeader, pageTitleGroup, pageTitle, pageSubtitle,
+  balanceCard, balanceLabel, balanceValueGreen, balanceValueRed,
+  tableCard, tableWrapper, table, tableHead, tableTh,
+  tableTbody, tableTr, tableTd, tableTdBold, emptyState,
+  formWrapper, formActions,
+} from './styles';
+
+const schema = z.object({
+  fundId: z.string().min(1, 'Selecione um fundo'),
+  type:   z.enum(['APORTE', 'RESGATE']),
+  value:  z.coerce.number().positive('Valor deve ser positivo'),
+  date:   z.string()
+    .min(1, 'Data obrigatória')
+    .refine((val) => {
+      const year = new Date(val).getFullYear();
+      return year >= 1000 && year <= 9999;
+    }, 'Ano deve ter 4 dígitos'),
+});
+
+type FormData = z.infer<typeof schema>;
+
+const TYPE_OPTIONS = [
+  { value: 'APORTE',  label: 'Aporte' },
+  { value: 'RESGATE', label: 'Resgate' },
+];
+
+export function Transactions() {
+  const [isOpen, setIsOpen]                           = useState(false);
+  const [transactionToDelete, setTransactionToDelete] = useState<string | null>(null);
+  const toast                                         = useToast();
+
+  const { data: transactions, isLoading }                    = useTransactions();
+  const { data: summary }                                    = useWalletSummary();
+  const { data: funds }                                      = useFunds();
+  const { mutate: createTransaction, isPending }             = useCreateTransaction();
+  const { mutate: deleteTransaction, isPending: isDeleting } = useDeleteTransaction();
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    control,
+    formState: { errors },
+  } = useForm<FormData>({ resolver: zodResolver(schema) });
+
+  const onSubmit = (data: FormData) => {
+    createTransaction(data, {
+      onSuccess: () => {
+        reset();
+        setIsOpen(false);
+        toast.success('Movimentação registrada com sucesso!');
+      },
+      onError: (err) => {
+        toast.error(getErrorMessage(err));
+      },
+    });
+  };
+
+  const handleConfirmDelete = () => {
+    if (!transactionToDelete) return;
+    deleteTransaction(transactionToDelete, {
+      onSuccess: () => {
+        setTransactionToDelete(null);
+        toast.success('Movimentação removida com sucesso!');
+      },
+      onError: (err) => {
+        setTransactionToDelete(null);
+        toast.error(getErrorMessage(err));
+      },
+    });
+  };
+
+  const fundOptions = funds?.map((f) => ({
+    value: f.id,
+    label: `${f.ticker} — ${f.name}`,
+  })) ?? [];
+
+  const balance = summary?.balance ?? 0;
+
+  return (
+    <section className={pageWrapper}>
+      <ToastContainer toasts={toast.toasts} onRemove={toast.remove} />
+
+      <header className={pageHeader}>
+        <div className={pageTitleGroup}>
+          <h1 className={pageTitle}>Movimentações</h1>
+          <p className={pageSubtitle}>Registre aportes e resgates</p>
+        </div>
+        <Button onClick={() => setIsOpen(true)}>+ Nova Movimentação</Button>
+      </header>
+
+      <article className={balanceCard}>
+        <p className={balanceLabel}>Saldo da Carteira</p>
+        <p className={balance >= 0 ? balanceValueGreen : balanceValueRed}>
+          {fmt(balance)}
+        </p>
+      </article>
+
+      <article className={tableCard}>
+        <div className={tableWrapper}>
+          <table className={table}>
+            <thead className={tableHead}>
+              <tr>
+                {['Data', 'Fundo', 'Ticker', 'Tipo', 'Valor', 'Cotas', 'Ações'].map((h) => (
+                  <th key={h} className={tableTh}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={tableTbody}>
+              {isLoading && (
+                <tr>
+                  <td colSpan={7} className={emptyState}>Carregando...</td>
+                </tr>
+              )}
+              {transactions?.map((t) => (
+                <tr key={t.id} className={tableTr}>
+                  <td className={tableTd}>
+                    {t.date ? t.date.slice(0, 10).split('-').reverse().join('/') : '—'}
+                  </td>
+                  <td className={tableTdBold}>{t.fund.name}</td>
+                  <td className={tableTd}>
+                    <Badge label={t.fund.ticker} variant="info" />
+                  </td>
+                  <td className={tableTd}>
+                    <Badge
+                      label={t.type}
+                      variant={t.type === 'APORTE' ? 'success' : 'danger'}
+                    />
+                  </td>
+                  <td className={tableTd}>{fmt(t.value)}</td>
+                  <td className={tableTd}>{t.quotas.toFixed(4)}</td>
+                  <td className={tableTd}>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => setTransactionToDelete(t.id)}
+                    >
+                      Remover
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {(!transactions || transactions.length === 0) && !isLoading && (
+            <p className={emptyState}>Nenhuma movimentação registrada</p>
+          )}
+        </div>
+      </article>
+
+      <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title="Nova Movimentação">
+        <form onSubmit={handleSubmit(onSubmit)} className={formWrapper}>
+          <Select
+            label="Fundo"
+            {...register('fundId')}
+            options={fundOptions}
+            error={errors.fundId?.message}
+          />
+          <Select
+            label="Tipo"
+            {...register('type')}
+            options={TYPE_OPTIONS}
+            error={errors.type?.message}
+          />
+          <Controller
+            name="value"
+            control={control}
+            render={({ field }) => (
+              <CurrencyInput
+                label="Valor (R$)"
+                value={field.value}
+                onChange={field.onChange}
+                error={errors.value?.message}
+              />
+            )}
+          />
+          <Input
+            label="Data"
+            type="date"
+            max="9999-12-31"
+            {...register('date')}
+            error={errors.date?.message}
+          />
+          <div className={formActions}>
+            <Button variant="secondary" type="button" onClick={() => setIsOpen(false)}>
+              Cancelar
+            </Button>
+            <Button type="submit" loading={isPending}>Registrar</Button>
+          </div>
+        </form>
+      </Modal>
+
+      <ConfirmModal
+        isOpen={transactionToDelete !== null}
+        onClose={() => setTransactionToDelete(null)}
+        onConfirm={handleConfirmDelete}
+        title="Remover Movimentação"
+        message="Tem certeza que deseja remover esta movimentação? Esta ação não pode ser desfeita."
+        confirmLabel="Remover"
+        isPending={isDeleting}
+      />
+    </section>
+  );
+}
+========== ./frontend/src/pages/Transactions/styles.ts ==========
+export {
+  tableCard,
+  tableWrapper,
+  table,
+  tableHead,
+  tableTh,
+  tableTbody,
+  tableTr,
+  tableTd,
+  tableTdBold,
+  emptyState,
+  formWrapper,
+  formActions,
+  pageWrapper,
+  pageHeader,
+  pageTitle,
+  pageSubtitle,
+  pageTitleGroup,
+} from '../../styles/shared';
+
+export const balanceCard =
+  'bg-white rounded-2xl p-6 shadow-sm border border-[#e8ddd0] inline-block min-w-[220px] relative overflow-hidden ' +
+  'before:absolute before:inset-x-0 before:top-0 before:h-[3px] before:bg-gradient-to-r before:from-[#a8906f] before:to-[#c8aa88]';
+export const balanceLabel      = 'text-xs font-semibold uppercase tracking-widest text-[#9e8b78]';
+export const balanceValueGreen = 'text-2xl font-bold mt-3 text-[#2d7a4f] tracking-tight';
+export const balanceValueRed   = 'text-2xl font-bold mt-3 text-red-600 tracking-tight';
+========== ./frontend/src/services/api.ts ==========
+import axios from 'axios';
+
+export const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3333/api',
+  headers: { 'Content-Type': 'application/json' },
+});
+========== ./frontend/src/services/fund.service.ts ==========
+import { api } from './api';
+import type { Fund, CreateFundDTO } from '../types';
+
+export const fundService = {
+  getAll: async (): Promise<Fund[]> => {
+    const { data } = await api.get('/funds');
+    return data;
+  },
+  create: async (dto: CreateFundDTO): Promise<Fund> => {
+    const { data } = await api.post('/funds', dto);
+    return data;
+  },
+  update: async (id: string, dto: Partial<CreateFundDTO>): Promise<Fund> => {
+    const { data } = await api.put(`/funds/${id}`, dto);
+    return data;
+  },
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/funds/${id}`);
+  },
+};
+========== ./frontend/src/services/transaction.service.ts ==========
+import { api } from './api';
+import type { Transaction, CreateTransactionDTO, WalletSummary } from '../types';
+
+export const transactionService = {
+  getAll: async (): Promise<Transaction[]> => {
+    const { data } = await api.get('/transactions');
+    return data;
+  },
+  getWalletSummary: async (): Promise<WalletSummary> => {
+    const { data } = await api.get('/transactions/wallet/summary');
+    return data;
+  },
+  create: async (dto: CreateTransactionDTO): Promise<Transaction> => {
+    const { data } = await api.post('/transactions', dto);
+    return data;
+  },
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/transactions/${id}`);
+  },
+};
+========== ./frontend/src/styles/shared.ts ==========
+export const pageWrapper    = 'space-y-6';
+export const pageHeader     = 'flex items-center justify-between';
+export const pageTitleGroup = 'space-y-1';
+export const pageTitle      = 'text-2xl font-bold text-[#3d2f22] tracking-tight';
+export const pageSubtitle   = 'text-sm text-[#9e8b78]';
+
+export const tableCard =
+  'bg-white rounded-xl shadow-sm border border-[#e8ddd0] overflow-hidden';
+export const tableCardHeader =
+  'p-6 border-b border-[#f0e8de]';
+export const tableCardTitle =
+  'text-lg font-semibold text-[#3d2f22]';
+
+export const tableWrapper = 'overflow-x-auto';
+export const table        = 'w-full';
+export const tableHead    = 'bg-[#faf7f4]';
+export const tableTh =
+  'px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-[#9e8b78]';
+export const tableTbody   = 'divide-y divide-[#f3ede7]';
+export const tableTr      = 'hover:bg-[#faf7f4] transition-colors duration-150';
+export const tableTd      = 'px-6 py-4 text-sm text-[#5c4a38]';
+export const tableTdBold  = 'px-6 py-4 text-sm font-semibold text-[#3d2f22]';
+export const emptyState   = 'text-center text-[#b8a898] italic py-10';
+
+export const formWrapper = 'space-y-4';
+export const formActions = 'flex gap-2 justify-end pt-2';
+========== ./frontend/src/types/index.ts ==========
+export interface Fund {
+  id: string;
+  name: string;
+  ticker: string;
+  type: string;
+  quotaValue: number;
+  createdAt: string;
+}
+
+export interface Transaction {
+  id: string;
+  fundId: string;
+  fund: { name: string; ticker: string };
+  type: 'APORTE' | 'RESGATE';
+  value: number;
+  quotas: number;
+  date: string;
+  createdAt: string;
+}
+
+export interface WalletSummary {
+  balance: number;
+  totalTransactions: number;
+}
+
+export interface CreateFundDTO {
+  name: string;
+  ticker: string;
+  type: string;
+  quotaValue: number;
+}
+
+export interface CreateTransactionDTO {
+  fundId: string;
+  type: 'APORTE' | 'RESGATE';
+  value: number;
+  date: string;
+}
+========== ./frontend/src/utils/error.ts ==========
+import axios from 'axios';
+
+export function getErrorMessage(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const data = err.response?.data;
+    if (data?.error) return data.error;
+    if (data?.message) return data.message;
+    if (err.message) return err.message;
+  }
+  if (err instanceof Error) return err.message;
+  return 'Ocorreu um erro inesperado.';
+}
+========== ./frontend/src/utils/format.ts ==========
+export const fmt = (value: number): string =>
+  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+========== ./frontend/tailwind.config.js ==========
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}
+========== ./frontend/tsconfig.app.json ==========
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2023",
+    "useDefineForClassFields": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "types": ["vite/client"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+  },
+  "include": ["src"]
+}
+
+========== ./frontend/tsconfig.json ==========
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+========== ./frontend/tsconfig.node.json ==========
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+  },
+  "include": ["vite.config.ts"]
+}
+
+========== ./frontend/vite.config.ts ==========
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+})
+
+========== ./package.json ==========
+{
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.9.3"
+  }
+}
+

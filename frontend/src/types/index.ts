@@ -20,6 +20,7 @@ export interface Transaction {
 
 export interface WalletSummary {
   balance: number;
+  totalQuotas: number;
   totalTransactions: number;
 }
 

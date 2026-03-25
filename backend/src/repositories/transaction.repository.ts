@@ -48,4 +48,21 @@ export const transactionRepository = {
 
     return aporte - resgate;
   },
+
+  getTotalQuotas: async (): Promise<number> => {
+    const result = await prisma.transaction.groupBy({
+      by: ['type'],
+      _sum: { quotas: true },
+    });
+
+    type ResultItem = (typeof result)[number];
+
+    const aporte =
+      result.find((r: ResultItem) => r.type === 'APORTE')?._sum.quotas ?? 0;
+
+    const resgate =
+      result.find((r: ResultItem) => r.type === 'RESGATE')?._sum.quotas ?? 0;
+
+    return aporte - resgate;
+  },
 };

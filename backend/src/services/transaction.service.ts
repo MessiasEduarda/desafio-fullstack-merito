@@ -14,8 +14,9 @@ export const transactionService = {
 
   getWalletSummary: async () => {
     const balance = await transactionRepository.getWalletBalance();
+    const totalQuotas = await transactionRepository.getTotalQuotas();
     const totalTransactions = await prisma.transaction.count();
-    return { balance, totalTransactions };
+    return { balance, totalQuotas, totalTransactions };
   },
 
   create: async (data: {
