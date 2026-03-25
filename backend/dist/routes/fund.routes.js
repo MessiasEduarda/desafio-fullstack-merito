@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.fundRoutes = void 0;
+const express_1 = require("express");
+const fund_controller_1 = require("../controllers/fund.controller");
+const validate_middleware_1 = require("../middlewares/validate.middleware");
+exports.fundRoutes = (0, express_1.Router)();
+exports.fundRoutes.get('/', fund_controller_1.fundController.getAll);
+exports.fundRoutes.get('/:id', fund_controller_1.fundController.getById);
+exports.fundRoutes.post('/', (0, validate_middleware_1.validate)(validate_middleware_1.CreateFundSchema), fund_controller_1.fundController.create);
+exports.fundRoutes.put('/:id', (0, validate_middleware_1.validate)(validate_middleware_1.UpdateFundSchema), fund_controller_1.fundController.update);
+exports.fundRoutes.delete('/:id', fund_controller_1.fundController.delete);

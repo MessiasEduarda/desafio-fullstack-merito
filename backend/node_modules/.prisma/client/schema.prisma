@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Fund {
+  id           String        @id @default(uuid())
+  name         String
+  ticker       String        @unique
+  type         String
+  quotaValue   Float
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  transactions Transaction[]
+}
+
+model Transaction {
+  id        String          @id @default(uuid())
+  fundId    String
+  fund      Fund            @relation(fields: [fundId], references: [id], onDelete: Cascade)
+  type      TransactionType
+  value     Float
+  quotas    Float
+  date      DateTime
+  createdAt DateTime        @default(now())
+}
+
+enum TransactionType {
+  APORTE
+  RESGATE
+}

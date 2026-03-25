@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.transactionRoutes = void 0;
+const express_1 = require("express");
+const transaction_controller_1 = require("../controllers/transaction.controller");
+const validate_middleware_1 = require("../middlewares/validate.middleware");
+exports.transactionRoutes = (0, express_1.Router)();
+exports.transactionRoutes.get('/', transaction_controller_1.transactionController.getAll);
+exports.transactionRoutes.get('/wallet/summary', transaction_controller_1.transactionController.getWalletSummary);
+exports.transactionRoutes.post('/', (0, validate_middleware_1.validate)(validate_middleware_1.CreateTransactionSchema), transaction_controller_1.transactionController.create);
+exports.transactionRoutes.delete('/:id', transaction_controller_1.transactionController.delete);

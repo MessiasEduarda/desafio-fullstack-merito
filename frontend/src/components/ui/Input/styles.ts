@@ -1,0 +1,10 @@
+export const inputBase =
+  'w-full border rounded-full px-4 py-2 text-sm outline-none transition-all duration-200 bg-white placeholder:text-[#c4b4a4] text-[#3d2f22]';
+
+export const inputStates = {
+  default: 'border-[#d4c4b4] focus:border-[#a8906f] focus:ring-2 focus:ring-[#a8906f]/20',
+  error:   'border-red-400 focus:border-red-500 focus:ring-2 focus:ring-red-100',
+} as const;
+
+export const labelStyle = 'text-sm font-medium text-[#5c4a38]';
+export const errorStyle = 'text-xs text-red-500 mt-0.5';
